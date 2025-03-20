@@ -50,23 +50,23 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
     """
     assert not isinstance(bbox_result, tuple)
 
-    bboxes = np.vstack(bbox_result)  # n x 5
+    #bboxes = np.vstack(bbox_result)  # n x 5
 
-    labels = [np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(bbox_result)]
+    #labels = [np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(bbox_result)]
 
-    labels = np.concatenate(labels)  # n
+    #labels = np.concatenate(labels)  # n
 
-    ndet = bboxes.shape[0]
+    ndet = bbox_result["bboxes"].shape[0]
 
     # fix bbox
     new_boxes = []
-    for box, label in zip(bboxes, labels):
+    for box, label ,s in zip(bbox_result["bboxes"], bbox_result["labels"], bbox_result["scores"]):
         x1 = min(max(0, int(box[0])), imsize[1])
         y1 = min(max(0, int(box[1])), imsize[0])
         x2 = min(max(x1 + 1, int(box[2])), imsize[1])
         y2 = min(max(y1 + 1, int(box[3])), imsize[0])
         if (y2 - y1 + 1 > 2) and (x2 - x1 + 1 > 2):
-            new_boxes.append([x1, y1, x2, y2, box[4], label])
+            new_boxes.append([x1, y1, x2, y2, s, label])
 
     if len(new_boxes) == 0:  # no bboxes
         new_boxes.append([0, 0, imsize[1]-1, imsize[0]-1, 1.0, 0])
@@ -84,6 +84,7 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
         sampled_boxes = new_boxes[:nbox]
 
     return sampled_boxes
+
 
 
 def bbox_to_imroi(transform, bboxes, image):
@@ -115,11 +116,17 @@ def extract_features(detector, feat_extractor, video_file, n_frames=50, n_boxes=
         else:
             frame = videoReader.get_frame(idx)
         # run object detection inference
+        #print(type(frame))
         bbox_result = inference_detector(detector, frame)
 
+        pred = bbox_result.pred_instances
+        bbox_result = {"bboxes": pred.bboxes.cpu().numpy() if hasattr(pred, 'bboxes') else None, 
+                        "scores": pred.scores.cpu().numpy() if hasattr(pred, 'scores') else None,
+                        "labels": pred.labels.cpu().numpy() if hasattr(pred, 'labels') else None}
 
-
+        #print("bbox_result: ", bbox_result)
         # sampling a fixed number of bboxes
+        
         bboxes = bbox_sampling(bbox_result, nbox=n_boxes, imsize=frame.shape[:2])
 
 
@@ -223,7 +230,7 @@ def preprocess_results(pred_score, cumsum=False):
 
     # sampling
     xvals = np.linspace(0,len(pred_score)-1,10)
-    pred_mean_reduce = pred_score[xvals.astype(np.int)]
+    pred_mean_reduce = pred_score[xvals.astype(np.int64)]
 
     xvals_new = np.linspace(1,len(pred_score)+1, p.n_frames)
     pred_score = make_interp_spline(xvals, pred_mean_reduce)(xvals_new)
@@ -269,12 +276,13 @@ if __name__ == '__main__':
 
     device = torch.device('cuda:'+str(p.gpu_id)) if torch.cuda.is_available() else torch.device('cpu')
     if p.task == 'extract_feature':
-        from mmdet.apis import init_detector, inference_detector, show_result
+        from mmdet.apis import init_detector, inference_detector
+        # from mmdet.structures import DetDataSample
         import mmcv
         # init object detector
         currentDirectory = os.getcwd()
-        cfg_file = osp.join(p.mmdetection, "configs/cascade_rcnn_x101_64x4d_fpn_1x_kitti2d.py")
-        model_file = osp.join(p.mmdetection, "work_dirs/cascade_rcnn_x101_64x4d_fpn_1x_kitti2d/latest.pth")
+        cfg_file = osp.join(p.mmdetection, "configs/cascade_rcnn/cascade-rcnn_x101-64x4d_fpn_1x_coco.py")
+        model_file = osp.join(p.mmdetection, "cascade_rcnn_x101_64x4d_fpn_1x_coco_20200515_075702-43ce6a30.pth")
         detector = init_detector(cfg_file, model_file, device=device)
         # init feature extractor
         feat_extractor = init_feature_extractor(backbone='vgg16', device=device)
@@ -293,15 +301,23 @@ if __name__ == '__main__':
             # run inference
             losses, all_outputs, all_hidden, all_alphas = model(features, labels, toa, hidden_in=None)
         alphas = all_alphas
-
+        print("alphas created: ",alphas[:2], "type: ", type(alphas), "len: ", len(alphas))
+        print("len of alphas[0]: ", len(alphas[0]))
 
         # parse and save results
         pred_score= parse_results(all_outputs)
         result_file = osp.join(osp.dirname(p.feature_file), p.feature_file.split('/')[-1].split('_')[0] + '_result.npz')
-        np.savez_compressed(result_file, score=pred_score[0], det=detections[0],alphas = alphas)
+        alphas = [alpha.cpu().numpy() for alpha in alphas]
+        print("alphas after modification: ", alphas[:2], "type: ", type(alphas), "len: ", len(alphas))
+        np.savez_compressed(result_file, score=pred_score[0], det=detections[0], alphas=alphas)
+        print("len of alphas[0]: ", len(alphas[0]))
+        print("sum of alphas[0]: ", sum(alphas[0]))
+
+
     elif p.task == 'visualize':
         video_data = get_video_frames(p.video_file, n_frames=p.n_frames)
         all_results = np.load(p.result_file, allow_pickle=True)
+        print("ALL results: ", all_results)
         pred_score,  detections, alphas = all_results['score'], all_results['det'], all_results['alphas']
         xvals, pred_score = preprocess_results(pred_score, cumsum=False)
 
@@ -330,8 +346,8 @@ if __name__ == '__main__':
         for t, frame in enumerate(video_data):
             attention_frame = np.zeros((frame.shape[0],frame.shape[1]),dtype = np.uint8)
             now_weight = alphas[t]
-            now_weight = now_weight.cpu()
-            now_weight = now_weight
+            #print("type of now weight: ", type(now_weight))
+            #now_weight = now_weight.cpu().numpy()
             det_boxes = detections[t]  # 19 x 6
             index = np.argsort(now_weight)
 

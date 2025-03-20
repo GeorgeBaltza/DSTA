@@ -16,7 +16,7 @@ if [ ! -f "$RESULT_FILE" ]; then
     if [ ! -f "$FEAT_FILE" ]; then
         # feature extraction task
         echo "Run feature extraction..."
-        source activate mmlab
+        source activate openmmlab2
         CUDA_VISIBLE_DEVICES=$GPUS python demo.py \
             --video_file $VIDEO_PATH \
             --task extract_feature \
@@ -28,7 +28,7 @@ if [ ! -f "$RESULT_FILE" ]; then
     fi
     # run inference
     echo "Run accident inference..."
-    source activate py37
+    source activate py311
     CUDA_VISIBLE_DEVICES=$GPUS python demo.py \
         --task inference \
         --feature_file $FEAT_FILE \
@@ -39,7 +39,7 @@ if [ ! -f "$RESULT_FILE" ]; then
 fi
 # visualize
 echo "Run result visualization..."
-source activate py37
+source activate py311
 CUDA_VISIBLE_DEVICES=$GPUS python demo.py \
     --task visualize \
     --video_file $VIDEO_PATH \
