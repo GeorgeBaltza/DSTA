@@ -60,7 +60,9 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
 
     # fix bbox
     new_boxes = []
+    
     for box, label ,s in zip(bbox_result["bboxes"], bbox_result["labels"], bbox_result["scores"]):
+        #print("box: ", box, "label: ", label, "s: ", s)
         x1 = min(max(0, int(box[0])), imsize[1])
         y1 = min(max(0, int(box[1])), imsize[0])
         x2 = min(max(x1 + 1, int(box[2])), imsize[1])
@@ -70,8 +72,7 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
 
     if len(new_boxes) == 0:  # no bboxes
         new_boxes.append([0, 0, imsize[1]-1, imsize[0]-1, 1.0, 0])
-    new_boxes = np.array(new_boxes, dtype=int)
-
+    new_boxes = np.array(new_boxes)
     # sampling
     n_candidate = min(topN, len(new_boxes))
     if len(new_boxes) <= nbox - n_candidate:
@@ -82,14 +83,14 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
         sampled_boxes = np.vstack((new_boxes, new_boxes[indices]))
     else:
         sampled_boxes = new_boxes[:nbox]
-
+    # print("SAMPLED BOXES: ", sampled_boxes)
     return sampled_boxes
 
 
 
 def bbox_to_imroi(transform, bboxes, image):
     imroi_data = []
-    for bbox in bboxes:
+    for bbox in np.array(bboxes, dtype=int):
         imroi = image[bbox[1]:bbox[3], bbox[0]:bbox[2], :]
         imroi = transform(Image.fromarray(imroi))  # (3, 224, 224), torch.Tensor
         imroi_data.append(imroi)
@@ -141,6 +142,10 @@ def extract_features(inferencer, feat_extractor, video_file, n_frames=50, n_boxe
         features[idx, 0, :] = np.squeeze(feature_frame.cpu().numpy()) if feature_frame.is_cuda else np.squeeze(feature_frame.detach().numpy())
         features[idx, 1:, :] = np.squeeze(feature_roi.cpu().numpy()) if feature_roi.is_cuda else np.squeeze(feature_roi.detach().numpy())
         frame_prev = frame
+    # print("detections: ", detections)
+    # print("features: ", features)
+    # print("Cuda available:", torch.cuda.is_available())
+    # print("Cuda device:", torch.cuda.current_device())
     return detections, features
 
 
@@ -153,6 +158,7 @@ def init_accident_model(model_file, dim_feature=4096, hidden_dim=512, latent_dim
     model.eval()
     # load check point
     model, _, _ = load_checkpoint(model, filename=model_file, isTraining=False)
+    print("Model state dict keys: ", model.state_dict().keys())
     return model
 
 
@@ -201,6 +207,8 @@ def parse_results(all_outputs, batch_size=1, n_frames=50):
         pred = all_outputs[t]  # B x 2
         pred = pred.cpu().numpy() if pred.is_cuda else pred.detach().numpy()
         pred_score[:, t] = np.exp(pred[:, 1]) / np.sum(np.exp(pred), axis=1)
+        #pred = pred.cpu().numpy() if pred.device.type == 'cuda' else pred.detach().numpy()
+        #pred_score[:,t] = torch.softmax(torch.tensor(pred), dim=1).numpy()[:,1]
     return pred_score
 
 
@@ -268,22 +276,31 @@ if __name__ == '__main__':
     parser.add_argument('--vis_file', type=str, help="the path to the visualization file.", default="demo/000821_vis.avi")
     p = parser.parse_args()
 
+
+    print("Is CUDA available:", torch.cuda.is_available())
+    print("CUDA device count:", torch.cuda.device_count())
+    print("Current CUDA device:", torch.cuda.current_device())
+    print("CUDA device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU detected")
+
+
+
     device = torch.device('cuda:'+str(p.gpu_id)) if torch.cuda.is_available() else torch.device('cpu')
     if p.task == 'extract_feature':
         import mmdet  # Ensures the "mmdet" registry scope is loaded
         from mmengine import Registry
         from mmdet.apis import DetInferencer
-        inferencer = DetInferencer('cascade-rcnn_x101-64x4d_fpn_1x_coco',show_progress=False)
 
         import mmcv
         # init object detector
         currentDirectory = os.getcwd()
         # cfg_file = osp.join(p.mmdetection, "configs/cascade_rcnn/cascade-rcnn_x101-64x4d_fpn_1x_coco.py")
-        # model_file = osp.join(p.mmdetection, "cascade_rcnn_x101_64x4d_fpn_1x_coco_20200515_075702-43ce6a30.pth")
+        model_file = osp.join(p.mmdetection, "cascade_rcnn_x101_64x4d_fpn_1x_coco_20200515_075702-43ce6a30.pth")
         # cfg_file = osp.join(p.mmdetection, "configs/rtmdet/rtmdet_tiny_8xb32-300e_coco.py")
         # model_file = osp.join(p.mmdetection, "rtmdet_tiny_8xb32-300e_coco_20220902_112414-78e30dcc.pth")
         # detector = init_detector(cfg_file, model_file, device=device)
         # init feature extractor
+        inferencer = DetInferencer('cascade-rcnn_x101-64x4d_fpn_1x_coco', show_progress=False)
+
         feat_extractor = init_feature_extractor(backbone='vgg16', device=device)
         # object detection & feature extraction
         detections, features = extract_features(inferencer, feat_extractor, p.video_file, n_frames=p.n_frames)
@@ -293,25 +310,21 @@ if __name__ == '__main__':
         from src.Models import DSTA
         # load feature file
         features, labels, toa, detections, vid = load_input_data(p.feature_file, device=device)
-
+       # print("Features: ", features, "Labels: ", labels, "Toa: ", toa, "Detections: ", detections, "Vid: ", vid)
         # prepare model
         model = init_accident_model(p.ckpt_file, dim_feature=features.shape[-1], n_frames=p.n_frames, fps=p.fps)
         with torch.no_grad():
             # run inference
             losses, all_outputs, all_hidden, all_alphas = model(features, labels, toa, hidden_in=None)
         alphas = all_alphas
-        #print("alphas created: ",alphas[:2], "type: ", type(alphas), "len: ", len(alphas))
-        #print("len of alphas[0]: ", len(alphas[0]))
 
         # parse and save results
         pred_score= parse_results(all_outputs)
+        print(all_outputs)
         result_file = osp.join(osp.dirname(p.feature_file), p.feature_file.split('/')[-1].split('_')[0] + '_result.npz')
         alphas = [alpha.cpu().numpy() for alpha in alphas]
         #print("alphas after modification: ", alphas[:2], "type: ", type(alphas), "len: ", len(alphas))
         np.savez_compressed(result_file, score=pred_score[0], det=detections[0], alphas=alphas)
-        #print("len of alphas[0]: ", len(alphas[0]))
-        #print("sum of alphas[0]: ", sum(alphas[0]))
-
 
     elif p.task == 'visualize':
         video_data = get_video_frames(p.video_file, n_frames=p.n_frames)
