@@ -60,8 +60,17 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
 
     # fix bbox
     new_boxes = []
-    
+
+    #Adapt COCO output to KITTI format
+    label_translation = {3:0, 8:2, 1:3, 2:5, 4:5, 7:6}
     for box, label ,s in zip(bbox_result["bboxes"], bbox_result["labels"], bbox_result["scores"]):
+        box[2] += box[0]
+        box[3] += box[1]
+        if label in label_translation.keys():
+            label = label_translation[label]
+        else:
+            label = 7
+
         #print("box: ", box, "label: ", label, "s: ", s)
         x1 = min(max(0, int(box[0])), imsize[1])
         y1 = min(max(0, int(box[1])), imsize[0])
