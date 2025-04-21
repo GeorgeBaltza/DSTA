@@ -12,25 +12,45 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 import matplotlib.pyplot as plt
+from torchvision.transforms.functional import to_pil_image
+
+def plot_imroi(imroi,id, title="ROI", save_path=None, normalized=False):
+    """
+    Plots the given imroi (Region of Interest).
+    :param imroi: The ROI tensor to plot.
+    :param title: Title of the plot.
+    :param save_path: Path to save the plot. If None, the plot is shown.
+    """
+    plt.imshow(to_pil_image(imroi))  # Convert tensor to PIL image for visualization
+    plt.title(title)
+    plt.axis("off")
+    if save_path:
+        plt.savefig(save_path)  # Save the plot if a path is provided
+    else:
+        s = f"demo/roi/ROI_{id}"
+        if normalized:
+            s = s + "_normalized"
+        s = s + ".png"
+        plt.savefig(s)  # Save the plot with a default name
+    plt.close()
+
+
 
 class VGG16(nn.Module):
     def __init__(self):
         super(VGG16, self).__init__()
         VGG = models.vgg16(weights="DEFAULT")
         self.feature = VGG.features
-        self.classifier = nn.Sequential(*list(VGG.classifier.children())[:-3])
-        pretrained_dict = VGG.state_dict()
-        model_dict = self.classifier.state_dict()
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-        model_dict.update(pretrained_dict)
-        self.classifier.load_state_dict(model_dict)
-        self.dim_feat = 4096
+        # Keep all classifier layers, we'll slice in forward
+        self.classifier = VGG.classifier
+        self.dim_feat = 4096  # Output of fc6
 
     def forward(self, x):
-        output = self.feature(x)
-        output = output.view(output.size(0), -1)
-        output = self.classifier(output)
-        return output
+        x = self.feature(x)
+        x = x.view(x.size(0), -1)
+        # Only up to fc6 (index 0) and fc7 (index 3)
+        x = self.classifier[:4](x)  # fc6 + ReLU + Dropout
+        return x
 
 def init_feature_extractor(backbone='vgg16', device=torch.device('cuda')):
     feat_extractor = None
@@ -41,7 +61,6 @@ def init_feature_extractor(backbone='vgg16', device=torch.device('cuda')):
     else:
         raise NotImplementedError
     return feat_extractor
-
 
 def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
     """
@@ -62,24 +81,25 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
     new_boxes = []
 
     #Adapt COCO output to KITTI format
-    label_translation = {3:0, 8:2, 1:3, 2:5, 4:5, 7:6}
+    # label_translation = {2:0, 7:2, 0:3, 1:5, 3:5, 6:6}
+    label_translation = {2:0, 7:0, 0:1, 1:2, 3:2, 6:0, 5:0}
     for box, label ,s in zip(bbox_result["bboxes"], bbox_result["labels"], bbox_result["scores"]):
-        box[2] += box[0]
-        box[3] += box[1]
         if label in label_translation.keys():
             label = label_translation[label]
         else:
-            label = 7
+            label = -1 
 
-        #print("box: ", box, "label: ", label, "s: ", s)
         x1 = min(max(0, int(box[0])), imsize[1])
         y1 = min(max(0, int(box[1])), imsize[0])
         x2 = min(max(x1 + 1, int(box[2])), imsize[1])
         y2 = min(max(y1 + 1, int(box[3])), imsize[0])
         if (y2 - y1 + 1 > 2) and (x2 - x1 + 1 > 2):
-            new_boxes.append([x1, y1, x2, y2, s, label])
+            if label != -1:
+                new_boxes.append([x1, y1, x2, y2, s, label])
 
-    if len(new_boxes) == 0:  # no bboxes
+    print(f"Boxes removed : {len(bbox_result['bboxes']) - len(new_boxes)}")
+    if len(new_boxes) == 0:  
+        print(" no bboxes found")
         new_boxes.append([0, 0, imsize[1]-1, imsize[0]-1, 1.0, 0])
     new_boxes = np.array(new_boxes)
     # sampling
@@ -92,17 +112,22 @@ def bbox_sampling(bbox_result, nbox=19, imsize=None, topN=5):
         sampled_boxes = np.vstack((new_boxes, new_boxes[indices]))
     else:
         sampled_boxes = new_boxes[:nbox]
-    # print("SAMPLED BOXES: ", sampled_boxes)
     return sampled_boxes
-
 
 
 def bbox_to_imroi(transform, bboxes, image):
     imroi_data = []
+    # normalize_transform = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    id = 0  # Normalization
     for bbox in np.array(bboxes, dtype=int):
         imroi = image[bbox[1]:bbox[3], bbox[0]:bbox[2], :]
+        # print("imroi shape: ", imroi.shape, "bbox: ", bbox)
         imroi = transform(Image.fromarray(imroi))  # (3, 224, 224), torch.Tensor
+        #plot_imroi(imroi, id)
+        # imroi = normalize_transform(imroi)
+        #plot_imroi(imroi, id, normalized=True)
         imroi_data.append(imroi)
+        id +=1
     imroi_data = torch.stack(imroi_data)
     return imroi_data
 
@@ -111,11 +136,12 @@ def extract_features(inferencer, feat_extractor, video_file, n_frames=50, n_boxe
     # prepare video reader and data transformer
     videoReader = mmcv.VideoReader(video_file)
     transform = transforms.Compose([
-        # transforms.Resize(256),
+        #transforms.Resize((224, 224)),
         transforms.Resize(512),
         transforms.CenterCrop(224),
-        transforms.ToTensor()]
-    )
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
     features = np.zeros((n_frames, n_boxes + 1, feat_extractor.dim_feat), dtype=np.float32)
     detections = np.zeros((n_frames, n_boxes, 6))  # (50 x 19 x 6)
     frame_prev = None
@@ -131,30 +157,32 @@ def extract_features(inferencer, feat_extractor, video_file, n_frames=50, n_boxe
         bbox_result["scores"] = np.array(bbox_result["scores"])
         bbox_result["labels"] = np.array(bbox_result["labels"])
 
+        print("Frame idx: ", idx)
         bboxes = bbox_sampling(bbox_result, nbox=n_boxes, imsize=frame.shape[:2])
-
-
 
         detections[idx, :, :] = bboxes
         # prepare frame data
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         with torch.no_grad():
             # bboxes to roi feature
+                
+
             ims_roi = bbox_to_imroi(transform, bboxes, frame)
             ims_roi = ims_roi.float().to(device=device)
             feature_roi = feat_extractor(ims_roi)
-            # extract image feature
+
+            normalize_transform = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalization
             ims_frame = transform(Image.fromarray(frame))
+            # ims_frame = normalize_transform(ims_frame)  
             ims_frame = torch.unsqueeze(ims_frame, dim=0).float().to(device=device)
             feature_frame = feat_extractor(ims_frame)
         # obtain feature matrix
         features[idx, 0, :] = np.squeeze(feature_frame.cpu().numpy()) if feature_frame.is_cuda else np.squeeze(feature_frame.detach().numpy())
         features[idx, 1:, :] = np.squeeze(feature_roi.cpu().numpy()) if feature_roi.is_cuda else np.squeeze(feature_roi.detach().numpy())
         frame_prev = frame
-    # print("detections: ", detections)
-    # print("features: ", features)
-    # print("Cuda available:", torch.cuda.is_available())
-    # print("Cuda device:", torch.cuda.current_device())
+
+
+
     return detections, features
 
 
@@ -189,6 +217,7 @@ def load_input_data(feature_file, device=torch.device('cuda')):
     detections = np.expand_dims(detections, axis=0)
     vid = feature_file.split('/')[-1].split('.')[0]
 
+
     return features, labels, toa, detections, vid
 
 
@@ -216,8 +245,8 @@ def parse_results(all_outputs, batch_size=1, n_frames=50):
         pred = all_outputs[t]  # B x 2
         pred = pred.cpu().numpy() if pred.is_cuda else pred.detach().numpy()
         pred_score[:, t] = np.exp(pred[:, 1]) / np.sum(np.exp(pred), axis=1)
-        #pred = pred.cpu().numpy() if pred.device.type == 'cuda' else pred.detach().numpy()
-        #pred_score[:,t] = torch.softmax(torch.tensor(pred), dim=1).numpy()[:,1]
+        # pred = pred.cpu().numpy() if pred.device.type == 'cuda' else pred.detach().numpy()
+        # pred_score[:,t] = torch.softmax(torch.tensor(pred), dim=1).numpy()[:,1]
     return pred_score
 
 
@@ -295,6 +324,9 @@ if __name__ == '__main__':
 
     device = torch.device('cuda:'+str(p.gpu_id)) if torch.cuda.is_available() else torch.device('cpu')
     if p.task == 'extract_feature':
+        from mmdet.utils import register_all_modules
+        register_all_modules()
+
         import mmdet  # Ensures the "mmdet" registry scope is loaded
         from mmengine import Registry
         from mmdet.apis import DetInferencer
@@ -319,7 +351,7 @@ if __name__ == '__main__':
         from src.Models import DSTA
         # load feature file
         features, labels, toa, detections, vid = load_input_data(p.feature_file, device=device)
-       # print("Features: ", features, "Labels: ", labels, "Toa: ", toa, "Detections: ", detections, "Vid: ", vid)
+        # print("Features size: ", features.shape, "Labels: ", labels, "Toa: ", toa, "Detections: ", detections, "Vid: ", vid)
         # prepare model
         model = init_accident_model(p.ckpt_file, dim_feature=features.shape[-1], n_frames=p.n_frames, fps=p.fps)
         with torch.no_grad():
@@ -329,7 +361,7 @@ if __name__ == '__main__':
 
         # parse and save results
         pred_score= parse_results(all_outputs)
-        print(all_outputs)
+        print("Predictions: ", pred_score)
         result_file = osp.join(osp.dirname(p.feature_file), p.feature_file.split('/')[-1].split('_')[0] + '_result.npz')
         alphas = [alpha.cpu().numpy() for alpha in alphas]
         #print("alphas after modification: ", alphas[:2], "type: ", type(alphas), "len: ", len(alphas))
@@ -340,6 +372,7 @@ if __name__ == '__main__':
         all_results = np.load(p.result_file, allow_pickle=True)
 
         pred_score,  detections, alphas = all_results['score'], all_results['det'], all_results['alphas']
+        # print("pred_score: ", pred_score)
         xvals, pred_score = preprocess_results(pred_score, cumsum=False)
 
 
@@ -367,7 +400,6 @@ if __name__ == '__main__':
         for t, frame in enumerate(video_data):
             attention_frame = np.zeros((frame.shape[0],frame.shape[1]),dtype = np.uint8)
             now_weight = alphas[t]
-            #print("type of now weight: ", type(now_weight))
             #now_weight = now_weight.cpu().numpy()
             det_boxes = detections[t]  # 19 x 6
             index = np.argsort(now_weight)

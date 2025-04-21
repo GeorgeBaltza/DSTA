@@ -2,7 +2,7 @@
 set -x
 set -e
 
-source activate py37
+source activate py311
 PHASE=$1
 GPUS=$2
 DATA=$3

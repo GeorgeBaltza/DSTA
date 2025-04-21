@@ -1,0 +1,19 @@
++ echo Logging output to ./logs/train_2025-04-21_14-48.log
+Logging output to ./logs/train_2025-04-21_14-48.log
++ OUT_DIR=output/DSTA/vgg16
++ case ${PHASE} in
++ CUDA_VISIBLE_DEVICES=0
++ python main.py --dataset dad --feature_name vgg16 --phase train --base_lr 0.0001 --batch_size 10 --gpus 0 --output_dir output/DSTA/vgg16
+Using GPU devices:  [0]
+Traceback (most recent call last):
+  File "/home/HASM-CRP/DSTA/main.py", line 438, in <module>
+    train_eval()
+  File "/home/HASM-CRP/DSTA/main.py", line 204, in train_eval
+    train_data = DADDataset(data_path, p.feature_name, 'training', toTensor=True, device=device)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/HASM-CRP/DSTA/src/DataLoader.py", line 28, in __init__
+    self.files_list = self.get_filelist(filepath)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/HASM-CRP/DSTA/src/DataLoader.py", line 43, in get_filelist
+    assert os.path.exists(filepath), "Directory does not exist: %s"%(filepath)
+AssertionError: Directory does not exist: /home/HASM-CRP/DSTA/./data/dad/vgg16_features/training
